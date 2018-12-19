@@ -4,7 +4,6 @@ import json
 import sys
 import os
 import sqltables
-from webexteamssdk import WebexTeamsAPI
 from sqlalchemy import and_, or_, not_
 from sqlalchemy import func
 
@@ -16,6 +15,7 @@ except ImportError as e:
     print("Looks like 'flask' library is missing.\n"
           "Type 'pip3 install flask' command to install the missing library.")
     sys.exit()
+
 
 # API Calls and token retrieval
 
@@ -77,6 +77,7 @@ def profanity_check():
     msg = None
     webhook = request.get_json(silent=True)
     matchList = in_message.split()
+    # Check if message in contains profanity
     for word in matchList:
         query = sqltables.session.query(sqltables.Profanity).filter(
             and_(
@@ -84,9 +85,35 @@ def profanity_check():
                 sqltables.Profanity.words == word
             )
         ).first()
+        # If message does contain profanity..check if user is already on ban list
         if query is not None:
-            # send_webex_delete(apiurl + "/messages/" + webhook['data']['id'])
-            return "Please watch your language in this room.  Profanity is NOT allowed"
+            bancheck = sqltables.session.query(sqltables.Banlist).filter(
+                and_(
+                    sqltables.Banlist.roomid == webhook['data']['roomId'],
+                    sqltables.Banlist.user == webhook['data']['personEmail']
+                )
+            ).first()
+            # If user is on ban list then increase the ban count by 1.  If user has a count of 3 or more then remove them from the room
+            if bancheck is not None:
+                bancheck.count += 1
+                sqltables.session.commit()
+                countcheck = sqltables.session.query(func.max(sqltables.Banlist.count)).scalar()
+                if countcheck >= 3:
+                    # send_webex_delete(apiurl + "/memberships/" + webhook['data']['membershipId'])
+                    return webhook['data']['personEmail'] + " - Three strikes and you're out!!"
+                elif countcheck == 2:
+                    return webhook['data']['personEmail'] + " has two strikes"
+            # If user is not on ban list then add them with next empid and with a count of 1
+            else:
+                lastempid = sqltables.session.query(func.max(sqltables.Banlist.empid)).scalar()
+                empidnew = lastempid + 1
+                newban = sqltables.Banlist(empid=empidnew,
+                                           roomid=webhook['data']['roomId'],
+                                           user=webhook['data']['personEmail'],
+                                           count='1')
+                sqltables.session.add(newban)
+                sqltables.session.commit()
+                return webhook['data']['personEmail'] + " has one strike"
 
 # Main Application for message input and routing to method
 
@@ -137,7 +164,6 @@ def webex_webhook():
 def botcommands():
     global in_message
     if in_message.startswith("plist add"):
-        msg = None
         in_message = in_message.split()
         addProfanity = in_message[-1]
         addProfanity = addProfanity.lower()
@@ -158,13 +184,12 @@ def botcommands():
             sqltables.session.commit()
             msg = "The word " + addProfanity + " was added to the profanity list for this room"
         else:
-            msg = addProfanity + " is already on the profanity list for this room"
+            return addProfanity + " is already on the profanity list for this room"
         if msg != None:
             send_webex_post(apiurl + "/messages",
                             {"roomId": webhook['data']['roomId'], "markdown": msg})
 
     elif in_message.startswith("plist search"):
-        msg = None
         in_message = in_message.split()
         searchProfanity = in_message[-1]
         searchProfanity = searchProfanity.lower()
@@ -176,12 +201,9 @@ def botcommands():
             )
         ).first()
         if query is None:
-            msg = "The word " + searchProfanity + " is NOT on the profanity list for this room"
+            return "The word " + searchProfanity + " is NOT on the profanity list for this room"
         else:
-            msg = searchProfanity + " is on the profanity list for this room"
-        if msg != None:
-            send_webex_post(apiurl + "/messages",
-                            {"roomId": webhook['data']['roomId'], "markdown": msg})
+            return searchProfanity + " is on the profanity list for this room"
 
     elif in_message.startswith("plist list"):
         msg = None
@@ -191,11 +213,9 @@ def botcommands():
         for result in query:
             msg = result.words
             if msg != None:
-                send_webex_post(apiurl + "/messages",
-                                {"roomId": webhook['data']['roomId'], "markdown": msg})
+                send_webex_post(apiurl + "/messages", {"roomId": webhook['data']['roomId'], "markdown": msg})
 
     elif in_message.startswith("plist remove"):
-        msg = None
         in_message = in_message.split()
         removeProfanity = in_message[-1]
         removeProfanity = removeProfanity.lower()
@@ -207,17 +227,13 @@ def botcommands():
             )
         ).first()
         if query is None:
-            msg = removeProfanity + "is NOT on the profanity list"
+            return removeProfanity + "is NOT on the profanity list"
         else:
             sqltables.session.delete(query)
             sqltables.session.commit()
-            msg = removeProfanity + " has been removed from the profanity list for this room"
-        if msg != None:
-            send_webex_post(apiurl + "/messages",
-                            {"roomId": webhook['data']['roomId'], "markdown": msg})
+            return removeProfanity + " has been removed from the profanity list for this room"
 
-    if in_message.startswith("blist add"):
-        msg = None
+    elif in_message.startswith("blist add"):
         in_message = in_message.split()
         banAdd = in_message[-1]
         banAdd = banAdd.lower()
@@ -227,24 +243,21 @@ def botcommands():
         query = sqltables.session.query(sqltables.Banlist).filter(
             and_(
                 sqltables.Banlist.roomid == webhook['data']['roomId'],
-                sqltables.Banlist.users == banAdd
+                sqltables.Banlist.user == banAdd
             )
         ).first()
         if query is None:
-            newProfanity = sqltables.Banlist(empid=empidnew,
+            newBan = sqltables.Banlist(empid=empidnew,
                                              roomid=webhook['data']['roomId'],
-                                             users=banAdd)
-            sqltables.session.add(newProfanity)
+                                             user=banAdd,
+                                             count='3')
+            sqltables.session.add(newBan)
             sqltables.session.commit()
-            msg = "The user " + banAdd + " was added to the banned users list for this room"
+            return "The user " + banAdd + " was added to the banned users list for this room"
         else:
-            msg = banAdd + " is already on the banned users list for this room"
-        if msg != None:
-            send_webex_post(apiurl + "/messages",
-                            {"roomId": webhook['data']['roomId'], "markdown": msg})
+            return banAdd + " is already on the banned users list for this room"
 
     elif in_message.startswith("blist search"):
-        msg = None
         in_message = in_message.split()
         banSearch = in_message[-1]
         banSearch = banSearch.lower()
@@ -252,48 +265,40 @@ def botcommands():
         query = sqltables.session.query(sqltables.Banlist).filter(
             and_(
                 sqltables.Banlist.roomid == webhook['data']['roomId'],
-                sqltables.Banlist.users == banSearch
+                sqltables.Banlist.user == banSearch
             )
         ).first()
         if query is None:
-            msg = "The user " + banSearch + " is NOT on the banned users list for this room"
+            return "The user " + banSearch + " is NOT on the banned users list for this room"
         else:
-            msg = banSearch + " is on the banned users list for this room"
-        if msg != None:
-            send_webex_post(apiurl + "/messages",
-                            {"roomId": webhook['data']['roomId'], "markdown": msg})
+            return banSearch + " is on the banned users list for this room"
 
     elif in_message.startswith("blist list"):
         msg = None
         webhook = request.get_json(silent=True)
         query = sqltables.session.query(sqltables.Banlist).filter(sqltables.Banlist.roomid == webhook['data']['roomId'])
         for result in query:
-            msg = result.users
+            msg = result.user
             if msg != None:
-                send_webex_post(apiurl + "/messages",
-                                {"roomId": webhook['data']['roomId'], "markdown": msg})
+                send_webex_post(apiurl + "/messages", {"roomId": webhook['data']['roomId'], "markdown": msg})
 
     elif in_message.startswith("blist remove"):
-        msg = None
         in_message = in_message.split()
-        banRemove = in_message[-1]
-        banRemove = banRemove.lower()
+        userRemove = in_message[-1]
+        userRemove = userRemove.lower()
         webhook = request.get_json(silent=True)
-        query = sqltables.session.query(sqltables.Banlist).filter(
+        banRemove = sqltables.session.query(sqltables.Banlist).filter(
             and_(
                 sqltables.Banlist.roomid == webhook['data']['roomId'],
-                sqltables.Banlist.users == banRemove
+                sqltables.Banlist.user == userRemove
             )
         ).first()
-        if query is None:
-            msg = banRemove + "is NOT on the banned users list"
+        if banRemove is None:
+            return userRemove + "is NOT on the banned users list"
         else:
-            sqltables.session.delete(query)
+            sqltables.session.delete(banRemove)
             sqltables.session.commit()
-            msg = banRemove + " has been removed from the banned users list for this room"
-        if msg != None:
-            send_webex_post(apiurl + "/messages",
-                            {"roomId": webhook['data']['roomId'], "markdown": msg})
+            return userRemove + " has been removed from the banned users list for this room"
 
 
 # Checks to make sure token is valid and for a bot
@@ -317,7 +322,7 @@ def main():
               "You are missing your BOT's access token!!")
         sys.exit()
     # Provided token does not match up to bot account that ends in "webex.bot"
-    if "@webex.bot" not in bot_email:
+    if "@webex.bot" in bot_email:
         print("You have provided an invalid token which does not relate to a Bot Account")
         sys.exit()
     else:
