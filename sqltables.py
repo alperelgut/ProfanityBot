@@ -31,8 +31,7 @@ class Banlist(Base):
 
     empid = Column(Integer, primary_key=True)
     roomid = Column(String(50))
-    user = Column(String(50))
-    count = Column(Integer)
+    users = Column(String(50))
 
 
 Base.metadata.create_all(engine)
